@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-
+import pandas as pd
 import logging, os, h5py, glob
 import logging
 logger = logging.getLogger(__name__)
@@ -55,6 +55,7 @@ def initialize_datasets(args, datadir='../../../data/samples_h5', num_pts=None):
         for file in datafiles[split]:
             with h5py.File(file,'r') as f:
                 datasets[split].append({key: torch.from_numpy(val[:]) for key, val in f.items()})
+            # datasets[split].append(load_data(file))
  
     ### ------ 4: Error checking ------ ###
     # Basic error checking: Check the training/test/validation splits have the same set of keys.
@@ -74,3 +75,41 @@ def initialize_datasets(args, datadir='../../../data/samples_h5', num_pts=None):
     args.num_valid = torch_datasets['valid'].cumulative_sizes[-1]
 
     return args, torch_datasets
+
+
+def load_data(fp: str) -> dict:
+    """_summary_
+
+    Args:
+        fp (str): _description_
+
+    Returns:
+        Dict[torch.Tensor]: _description_
+    """
+    store = pd.HDFStore(fp)
+    x = store.select("table")
+    
+    momentum_cols = [i for i in x.columns if i.startswith("P")]
+    energy_cols = [i for i in x.columns if i.startswith("E")]
+
+    momentum_arr = x[momentum_cols].values
+    energy_arr = x[energy_cols].values
+    
+    n_samples, max_n_particles = energy_arr.shape
+    
+    reshaped_momentum_arr = momentum_arr.reshape((n_samples, max_n_particles, 3))
+    label_arr = x['is_signal_new'].values
+
+    # This copy operation is performed so that the array will become contiguous in memory. 
+    # reshaped_momentum_arr_out = reshaped_momentum_arr.copy(order='C')
+
+    four_momentum_arr_out = torch.zeros((n_samples, max_n_particles, 4))
+    four_momentum_arr_out[:, :, 0] = torch.from_numpy(energy_arr)
+    four_momentum_arr_out[:, :, 1:] = torch.from_numpy(reshaped_momentum_arr)
+
+    n_particles = torch.from_numpy(np.sum(energy_arr != 0., axis=1))
+
+    store.close()
+
+    out = {'is_signal': label_arr, 'Pmu': four_momentum_arr_out, 'Nobj': n_particles}
+    return out

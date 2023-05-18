@@ -88,14 +88,100 @@ class PELICANClassifier(nn.Module):
             The output of the model with 2 classification weights per event (intended for CrossEntropyLoss). 
             The class predicted by the classifier (0 or 1) is given by output.argmax(dim=1).
         """
+        # print("MODEL FORWARD PASS:", data.keys())
+        # print("MODEL FORWARD PASS, particle_mask shape", data['particle_mask'].shape)
+        # print("MODEL FORWARD PASS, particle_mask", data['particle_mask'][0])
+        # print("MODEL FORWARD PASS, edge_mask", data['edge_mask'][0])
+        # print("MODEL FORWARD PASS, edge_mask shape", data['edge_mask'].shape)
+        # print("MODEL FORWARD PASS, Pmu shape", data['Pmu'].shape)
         # Get and prepare the data
         particle_scalars, particle_mask, edge_mask, event_momenta = self.prepare_input(data)
+        print("MODEL, particle_scalars: ", particle_scalars.shape, particle_scalars[0])
+        print("MODEL, particle_mask: ", particle_mask.shape, particle_mask[0])
+        print("MODEL, edge_mask: ", edge_mask.shape, edge_mask[0])
+        print("MODEL, event_momenta: ", event_momenta.shape, event_momenta[0])
 
+        
         # Calculate spherical harmonics and radial functions
         num_particle = particle_mask.shape[1]
         nobj = particle_mask.sum(-1, keepdim=True)
         dot_products = dot4(event_momenta.unsqueeze(1), event_momenta.unsqueeze(2))
 
+        edge_mask = dot_products != 0.
+        if self.softmasked:
+            softmask = self.softmask_layer(dot_products, mask=edge_mask)
+
+        inputs = self.input_encoder(dot_products, mask=edge_mask.unsqueeze(-1))
+        inputs = self.input_mix_and_norm(inputs, mask=edge_mask.unsqueeze(-1))
+
+        if self.add_beams:
+            inputs = torch.cat([inputs, particle_scalars], dim=-1)
+
+        act1 = self.net2to2(inputs, mask=edge_mask.unsqueeze(-1), nobj=nobj, softmask=softmask.unsqueeze(1).unsqueeze(2) if self.softmasked else None)
+
+        act2 = self.message_layer(act1, mask=edge_mask.unsqueeze(-1))
+
+        if self.dropout:
+            act2 = self.dropout_layer(act2)
+
+        if self.softmasked:
+            act2 = act2 * softmask.unsqueeze(-1)
+
+        act3 = self.eq2to0(act2, nobj=nobj)
+        
+        if self.dropout:
+            act3 = self.dropout_layer_out(act3)
+
+        if self.mlp_out:
+            prediction = self.mlp_out(act3)
+        else:
+            prediction = act3
+
+        if torch.isnan(prediction).any():
+            logging.info(f"inputs: {torch.isnan(inputs).any()}")
+            logging.info(f"act1: {torch.isnan(act1).any()}")
+            logging.info(f"act2: {torch.isnan(act2).any()}")
+            logging.info(f"prediction: {torch.isnan(prediction).any()}")
+        assert not torch.isnan(prediction).any(), "There are NaN entries in the output! Evaluation terminated."
+
+        exit(0)
+        if covariance_test:
+            return prediction, [inputs, act1, act2, act3]
+        else:
+            return prediction
+
+    def forward_latency(self, data, covariance_test=False):
+        """
+        Runs a forward pass of the network.
+
+        Parameters
+        ----------
+        data : :obj:`dict`
+            Dictionary of data to pass to the network.
+        covariance_test : :obj:`bool`, optional
+            If true, returns several intermediate tensors as well.
+
+        Returns
+        -------
+        prediction : :obj:`torch.Tensor`
+            The output of the model with 2 classification weights per event (intended for CrossEntropyLoss). 
+            The class predicted by the classifier (0 or 1) is given by output.argmax(dim=1).
+        """
+        # Get and prepare the data
+        # particle_scalars, particle_mask, edge_mask, event_momenta = self.prepare_input(data)
+
+        particle_scalars, particle_mask, event_momenta = self.prepare_input_latency_timing(data)
+        # print("MODEL, particle_scalars: ", particle_scalars.shape, particle_scalars[0])
+        # print("MODEL, particle_mask: ", particle_mask.shape, particle_mask[0])
+        # # print("MODEL, edge_mask: ", edge_mask.shape, edge_mask[0])
+        # print("MODEL, event_momenta: ", event_momenta.shape, event_momenta[0])
+        
+        # Calculate spherical harmonics and radial functions
+        num_particle = particle_mask.shape[1]
+        nobj = particle_mask.sum(-1, keepdim=True)
+        dot_products = dot4(event_momenta.unsqueeze(1), event_momenta.unsqueeze(2))
+
+        edge_mask = dot_products != 0.
         if self.softmasked:
             softmask = self.softmask_layer(dot_products, mask=edge_mask)
 
@@ -137,6 +223,7 @@ class PELICANClassifier(nn.Module):
         else:
             return prediction
 
+
     def prepare_input(self, data):
         """
         Extracts input from data class
@@ -160,6 +247,7 @@ class PELICANClassifier(nn.Module):
         device, dtype = self.device, self.dtype
 
         particle_ps = data['Pmu'].to(device, dtype)
+        print("PREPARE DATA: particle_ps", particle_ps.shape)
 
         data['Pmu'].requires_grad_(True)
         particle_mask = data['particle_mask'].to(device, torch.bool)
@@ -167,9 +255,25 @@ class PELICANClassifier(nn.Module):
 
         if 'scalars' in data.keys():
             scalars = data['scalars'].to(device, dtype)
+            print("PREPARE DATA: scalars already generated")
+
         else:
             scalars = normsq4(particle_ps).abs().sqrt().unsqueeze(-1)
+        print("PREPARE DATA: scalars", scalars.shape)
         return scalars, particle_mask, edge_mask, particle_ps
+
+    def prepare_input_latency_timing(self, data):
+        """Data has shape (B, N, M, M)
+        """
+        particle_ps = data
+        s = particle_ps.shape
+        particle_mask = particle_ps[:, :, 0] != 0 # Should be size (B, N)
+        # scalars = torch.cat((torch.ones(s[0], 2, device=data.device), torch.zeros(s[0], s[1], device=data.device)), dim=1).view(s[0], s[1], s[1], 2)
+        scalars = torch.ones((s[0], s[1], s[1], 2), device=data.device)
+        # scalars = normsq4(particle_ps).abs().sqrt().unsqueeze(-1) # Should be size (B, N, N, 2)
+        # edge_mask = particle_ps != 0 # TODO: Figure out what this should be
+        
+        return scalars, particle_mask, particle_ps
 
 def expand_var_list(var):
     if type(var) is list:

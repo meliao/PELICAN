@@ -174,6 +174,7 @@ def collate_fn(data, scale=1., nobj=None, edge_features=[], add_beams=False, bea
     labels = torch.where(edge_mask.unsqueeze(-1), torch.stack([labelsi, labelsj], dim=-1), zero)
     if 'scalars' not in data.keys():
         data['scalars'] = labels.to(dtype=data['Pmu'].dtype)
+        print("COLLATE: data['scalars'] has shape:", data['scalars'].shape)
     else:
         data['scalars'] = torch.stack((data['scalars'], labels.to(dtype=data['Pmu'].dtype)))
         

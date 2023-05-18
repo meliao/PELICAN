@@ -14,6 +14,14 @@ class JetDataset(Dataset):
     """
     def __init__(self, data, num_pts=-1, shuffle=True):
 
+        print(f"Initializing a dataset with num_points: {num_pts} and shuffle: {shuffle}")
+
+        for k, v in data.items():
+            print(f"Data with key: {k} has shape {v.shape}")
+
+        print("Nobj", data['Nobj'][0])
+        print("Pmu", data['Pmu'][0])
+
         self.data = data
 
         if num_pts < 0:

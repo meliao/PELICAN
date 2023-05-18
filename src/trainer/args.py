@@ -244,6 +244,9 @@ def setup_argparse():
     parser.add_argument('--weight-init', type=str, default='randn', metavar='str',
                         help='Weight initialization function to use (default: rand)')
 
+
+    parser.add_argument('--test_latency', default=False, action='store_true')
+
     return parser
 
 
